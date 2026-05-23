@@ -2,137 +2,451 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
-# --- CONFIGURATION DE LA PAGE ---
-st.set_page_config(page_title="Azores Whale Watching Forecaster", page_icon="🐋", layout="wide")
+# =====================================================
+# PAGE CONFIG
+# =====================================================
 
-# --- MOTEUR DE PRÉVISION ---
-class WhaleWatchingPredictor:
-    def __init__(self):
-        self.poids = {'vagues': 40, 'vent': 35, 'visibilite': 15, 'soleil': 10}
-        self.max_vagues_m = 2.0      
-        self.max_vent_noeuds = 22.0  
-        self.min_visibilite_km = 2.0 
+st.set_page_config(
+    page_title="SEA COLORS",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    def calculer_probabilite(self, vagues, vent_kmh, vent_deg, visi_m, nuages):
-        # Conversion des unités de l'API
-        vent_noeuds = vent_kmh / 1.852
-        visi_km = visi_m / 1000
+# =====================================================
+# PATHS
+# =====================================================
 
-        # Kill switches
-        if vagues > self.max_vagues_m or vent_noeuds > self.max_vent_noeuds or visi_km < self.min_visibilite_km:
-            return 0.0
+BASE_DIR = Path(__file__).parent
+LOGO_PATH = BASE_DIR / "logo_seacolors.png"
 
-        # Scores
-        score_vagues = 100 if vagues <= 0.5 else max(0, 100 - ((vagues - 0.5) / 1.5) * 100)
-        
-        vent_effectif = vent_noeuds
-        if 270 <= vent_deg <= 360 or 0 <= vent_deg <= 90:
-            vent_effectif = vent_noeuds * 0.8 # Protection de l'île
-            
-        score_vent = 100 if vent_noeuds <= 5 else max(0, 100 - ((vent_effectif - 5) / 17) * 100)
-        score_visibilite = 100 if visi_km >= 10 else max(0, ((visi_km - 2) / 8) * 100)
-        score_soleil = 100 - (nuages * 0.5)
+# =====================================================
+# STYLE
+# =====================================================
 
-        score_final = (
-            (score_vagues * self.poids['vagues'] / 100) +
-            (score_vent * self.poids['vent'] / 100) +
-            (score_visibilite * self.poids['visibilite'] / 100) +
-            (score_soleil * self.poids['soleil'] / 100)
+st.markdown("""
+<style>
+
+body {
+    background-color: #F5F7FA;
+}
+
+[data-testid="stSidebar"] {
+    background-color: white;
+    border-right: 1px solid #E5E7EB;
+}
+
+.stButton > button {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid #D1D5DB;
+    background-color: white;
+    color: #102A43;
+    padding: 10px;
+    font-weight: 500;
+}
+
+.stButton > button:hover {
+    background-color: #102A43;
+    color: white;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# =====================================================
+# LANGUAGES
+# =====================================================
+
+LANGUAGES = {
+
+    "Français": {
+        "subtitle": "Prévisions marines",
+        "weather_model": "Modèle météo",
+        "expeditions": "Expéditions",
+        "forecast": "Prévisions",
+        "previous_day": "Jour précédent",
+        "next_day": "Jour suivant",
+        "waves": "Houle",
+        "wind": "Vent",
+        "visibility": "Visibilité",
+        "clouds": "Nuages",
+        "no_data": "Aucune donnée disponible",
+        "api_error": "Erreur API météo"
+    },
+
+    "English": {
+        "subtitle": "Marine Forecast",
+        "weather_model": "Weather model",
+        "expeditions": "Expeditions",
+        "forecast": "Forecast",
+        "previous_day": "Previous day",
+        "next_day": "Next day",
+        "waves": "Waves",
+        "wind": "Wind",
+        "visibility": "Visibility",
+        "clouds": "Clouds",
+        "no_data": "No data available",
+        "api_error": "Weather API error"
+    },
+
+    "Português": {
+        "subtitle": "Previsão marítima",
+        "weather_model": "Modelo meteorológico",
+        "expeditions": "Expedições",
+        "forecast": "Previsão",
+        "previous_day": "Dia anterior",
+        "next_day": "Próximo dia",
+        "waves": "Ondas",
+        "wind": "Vento",
+        "visibility": "Visibilidade",
+        "clouds": "Nuvens",
+        "no_data": "Nenhum dado disponível",
+        "api_error": "Erro API meteorológica"
+    }
+}
+
+# =====================================================
+# SIDEBAR
+# =====================================================
+
+with st.sidebar:
+
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+
+    st.markdown("## SEA COLORS")
+
+    selected_language = st.selectbox(
+        "Language",
+        ["Français", "English", "Português"]
+    )
+
+    txt = LANGUAGES[selected_language]
+
+    weather_model = st.selectbox(
+        txt["weather_model"],
+        [
+            "best_match",
+            "gfs_seamless"
+        ]
+    )
+
+# =====================================================
+# HEADER
+# =====================================================
+
+col_logo, col_title = st.columns([1, 5])
+
+with col_logo:
+
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=110)
+
+with col_title:
+
+    st.title("SEA COLORS")
+    st.caption(txt["subtitle"])
+
+# =====================================================
+# SESSION STATE
+# =====================================================
+
+if "day_offset" not in st.session_state:
+    st.session_state.day_offset = 0
+
+# =====================================================
+# SCORE FUNCTION
+# =====================================================
+
+def calculate_score(waves, wind_kmh, visibility_m, clouds):
+
+    try:
+
+        wind_knots = wind_kmh / 1.852
+        visibility_km = visibility_m / 1000
+
+        if waves > 2:
+            return 0
+
+        if wind_knots > 22:
+            return 0
+
+        if visibility_km < 2:
+            return 0
+
+        wave_score = max(0, 100 - waves * 40)
+        wind_score = max(0, 100 - wind_knots * 4)
+        visibility_score = min(100, visibility_km * 10)
+        cloud_score = 100 - (clouds * 0.5)
+
+        final_score = (
+            wave_score * 0.4 +
+            wind_score * 0.35 +
+            visibility_score * 0.15 +
+            cloud_score * 0.10
         )
-        return round(score_final, 1)
 
-# --- FONCTION DE RÉCUPÉRATION DES DONNÉES (API) ---
-@st.cache_data(ttl=3600) # Met en cache pendant 1h pour ne pas surcharger l'API
-def fetch_weather_data():
-    # Coordonnées de Ponta Delgada
-    lat, lon = 37.74, -25.67
-    
-    # Appel API Météo Classique (Vent, Visi, Nuages)
-    url_weather = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=windspeed_10m,winddirection_10m,visibility,cloudcover&timezone=auto"
-    # Appel API Marine (Vagues)
-    url_marine = f"https://marine-api.open-meteo.com/v1/marine?latitude={lat}&longitude={lon}&hourly=wave_height&timezone=auto"
+        return round(final_score, 1)
 
-    res_weather = requests.get(url_weather).json()
-    res_marine = requests.get(url_marine).json()
+    except:
+        return 0
 
-    # Création du DataFrame
-    df = pd.DataFrame({
-        'Date': pd.to_datetime(res_weather['hourly']['time']),
-        'Vent_kmh': res_weather['hourly']['windspeed_10m'],
-        'Direction_Vent': res_weather['hourly']['winddirection_10m'],
-        'Visibilite_m': res_weather['hourly']['visibility'],
-        'Nuages_pct': res_weather['hourly']['cloudcover'],
-        'Vagues_m': res_marine['hourly']['wave_height']
-    })
-    
-    # Filtrer uniquement les heures de jour (8h à 19h)
-    df = df[(df['Date'].dt.hour >= 8) & (df['Date'].dt.hour <= 19)]
-    
-    # Calcul des probabilités
-    predictor = WhaleWatchingPredictor()
-    df['Score (%)'] = df.apply(lambda row: predictor.calculer_probabilite(
-        row['Vagues_m'], row['Vent_kmh'], row['Direction_Vent'], 
-        row['Visibilite_m'], row['Nuages_pct']
-    ), axis=1)
+# =====================================================
+# WEATHER API
+# =====================================================
 
-    return df
+@st.cache_data(ttl=1800)
+def load_weather_data(model):
 
-# --- INTERFACE UTILISATEUR ---
-st.title("🐋 Azores Whale Watching - Prévisions de Sortie")
-st.markdown("Basé sur les conditions météo au départ de **Ponta Delgada (Embarcation 9m)**. Les données sont récupérées en temps réel et prévoient les 7 prochains jours.")
+    latitude = 37.74
+    longitude = -25.67
 
-# Récupération des données
-with st.spinner('Récupération des données météo en cours...'):
-    df = fetch_weather_data()
+    weather_url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={latitude}"
+        f"&longitude={longitude}"
+        "&hourly=wind_speed_10m,visibility,cloud_cover"
+        "&timezone=Atlantic/Azores"
+        f"&models={model}"
+    )
 
-# Conditions actuelles (ou la plus proche)
-now = datetime.now()
-future_df = df[df['Date'] >= now]
-if not future_df.empty:
-    current = future_df.iloc[0]
-    st.header("📍 Conditions Actuelles (Prochain créneau)")
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    # Couleur du score
-    score_color = "🟢" if current['Score (%)'] > 75 else "🟠" if current['Score (%)'] > 40 else "🔴"
-    
-    col1.metric("Faisabilité", f"{score_color} {current['Score (%)']}%")
-    col2.metric("Vagues", f"{current['Vagues_m']} m")
-    col3.metric("Vent", f"{round(current['Vent_kmh'] / 1.852, 1)} nds")
-    col4.metric("Visibilité", f"{round(current['Visibilite_m'] / 1000, 1)} km")
-    col5.metric("Nuages", f"{current['Nuages_pct']} %")
+    marine_url = (
+        "https://marine-api.open-meteo.com/v1/marine"
+        f"?latitude={latitude}"
+        f"&longitude={longitude}"
+        "&hourly=wave_height"
+        "&timezone=Atlantic/Azores"
+    )
 
-st.markdown("---")
+    try:
 
-# Graphique de prévisions sur 7 jours
-st.header("📅 Prévisions sur 7 Jours (Horaires de jour: 8h - 19h)")
-fig = px.bar(
-    df, x='Date', y='Score (%)', 
-    color='Score (%)', 
-    color_continuous_scale=[(0, "red"), (0.5, "orange"), (1, "green")],
-    title="Évolution des chances de sortie (100% = Conditions Parfaites)",
-    labels={'Date': 'Date et Heure', 'Score (%)': 'Probabilité de Sortie (%)'}
-)
-fig.update_layout(xaxis_tickformat='%A %d - %H:%M')
-st.plotly_chart(fig, use_container_width=True)
+        weather_response = requests.get(weather_url, timeout=20)
+        marine_response = requests.get(marine_url, timeout=20)
 
-# Tableau détaillé pour choisir l'horaire
-st.header("🕒 Choisir le meilleur horaire de départ")
-st.markdown("Clique sur l'entête des colonnes pour trier (ex: pour trouver les scores les plus hauts).")
+        weather_response.raise_for_status()
+        marine_response.raise_for_status()
 
-# Formatage pour un tableau plus lisible
-df_display = df.copy()
-df_display['Date'] = df_display['Date'].dt.strftime('%d/%m/%Y à %H:%M')
-df_display['Vent (Noeuds)'] = round(df_display['Vent_kmh'] / 1.852, 1)
-df_display['Visibilité (km)'] = round(df_display['Visibilite_m'] / 1000, 1)
+        weather_json = weather_response.json()
+        marine_json = marine_response.json()
 
-# Sélection des colonnes à afficher
-cols_to_show = ['Date', 'Score (%)', 'Vagues_m', 'Vent (Noeuds)', 'Direction_Vent', 'Visibilité (km)', 'Nuages_pct']
-st.dataframe(
-    df_display[cols_to_show].style.background_gradient(cmap='RdYlGn', subset=['Score (%)']),
-    use_container_width=True,
-    hide_index=True
-)
+        weather_df = pd.DataFrame(weather_json["hourly"])
+        marine_df = pd.DataFrame(marine_json["hourly"])
+
+        df = pd.merge(weather_df, marine_df, on="time")
+
+        df["Date"] = pd.to_datetime(df["time"])
+
+        df.rename(columns={
+            "wind_speed_10m": "Wind",
+            "visibility": "Visibility",
+            "cloud_cover": "Clouds",
+            "wave_height": "Waves"
+        }, inplace=True)
+
+        df["Score"] = df.apply(
+            lambda row: calculate_score(
+                row["Waves"],
+                row["Wind"],
+                row["Visibility"],
+                row["Clouds"]
+            ),
+            axis=1
+        )
+
+        return df
+
+    except:
+        return pd.DataFrame()
+
+# =====================================================
+# LOAD DATA
+# =====================================================
+
+df = load_weather_data(weather_model)
+
+if df.empty:
+    st.error(txt["api_error"])
+    st.stop()
+
+# =====================================================
+# REMOVE PAST + NIGHT HOURS
+# =====================================================
+
+current_time = datetime.now()
+
+df = df[df["Date"] >= current_time]
+
+df = df[
+    (df["Date"].dt.hour >= 8) &
+    (df["Date"].dt.hour <= 20)
+]
+
+# =====================================================
+# TABS
+# =====================================================
+
+tab1, tab2 = st.tabs([
+    txt["expeditions"],
+    txt["forecast"]
+])
+
+# =====================================================
+# TAB 1
+# =====================================================
+
+with tab1:
+
+    if df.empty:
+        st.info(txt["no_data"])
+        st.stop()
+
+    current_day = df["Date"].dt.date.iloc[0]
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+
+    with col1:
+
+        if st.button(txt["previous_day"]):
+            st.session_state.day_offset -= 1
+
+    with col3:
+
+        if st.button(txt["next_day"]):
+            st.session_state.day_offset += 1
+
+    selected_day = current_day + timedelta(days=st.session_state.day_offset)
+
+    st.subheader(selected_day.strftime("%d / %m / %Y"))
+
+    day_df = df[df["Date"].dt.date == selected_day]
+
+    expeditions = [
+
+        ("Morning", "08:30 - 12:30", [9,10,11,12]),
+        ("Afternoon", "12:30 - 16:30", [13,14,15,16]),
+        ("Evening", "16:30 - 20:30", [17,18,19,20])
+
+    ]
+
+    cols = st.columns(3)
+
+    for i, (period, label, hours) in enumerate(expeditions):
+
+        expedition_df = day_df[
+            day_df["Date"].dt.hour.isin(hours)
+        ]
+
+        with cols[i]:
+
+            st.markdown(f"### {period}")
+            st.caption(f"({label})")
+
+            if expedition_df.empty:
+                st.info(txt["no_data"])
+                continue
+
+            avg_score = round(expedition_df["Score"].mean())
+            avg_waves = round(expedition_df["Waves"].mean(), 1)
+            avg_wind = round(expedition_df["Wind"].mean() / 1.852, 1)
+            avg_visibility = round(expedition_df["Visibility"].mean() / 1000, 1)
+            avg_clouds = round(expedition_df["Clouds"].mean())
+
+            # SCORE COLORS
+
+            if avg_score >= 90:
+                color = "#15803D"
+
+            elif avg_score >= 75:
+                color = "#22C55E"
+
+            elif avg_score >= 60:
+                color = "#84CC16"
+
+            elif avg_score >= 45:
+                color = "#EAB308"
+
+            elif avg_score >= 30:
+                color = "#F97316"
+
+            else:
+                color = "#DC2626"
+
+            with st.container(border=True):
+
+                st.markdown(
+                    f"<h1 style='color:{color};'>{avg_score}%</h1>",
+                    unsafe_allow_html=True
+                )
+
+                st.write(f"{txt['waves']} : {avg_waves} m")
+                st.write(f"{txt['wind']} : {avg_wind} kn")
+                st.write(f"{txt['visibility']} : {avg_visibility} km")
+                st.write(f"{txt['clouds']} : {avg_clouds}%")
+
+# =====================================================
+# TAB 2
+# =====================================================
+
+with tab2:
+
+    st.subheader(txt["forecast"])
+
+    fig = px.bar(
+        df,
+        x="Date",
+        y="Score",
+        color="Score",
+        color_continuous_scale="RdYlGn"
+    )
+
+    fig.update_layout(
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=20, r=20, t=20, b=20),
+        coloraxis_showscale=False
+    )
+
+    fig.update_xaxes(showgrid=False)
+
+    fig.update_yaxes(
+        gridcolor="#E5E7EB"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    display_df = df.copy()
+
+    display_df["Date"] = display_df["Date"].dt.strftime(
+        "%d/%m/%Y %H:%M"
+    )
+
+    display_df["Wind"] = round(
+        display_df["Wind"] / 1.852,
+        1
+    )
+
+    display_df["Visibility"] = round(
+        display_df["Visibility"] / 1000,
+        1
+    )
+
+    st.dataframe(
+
+        display_df[[
+            "Date",
+            "Score",
+            "Waves",
+            "Wind",
+            "Visibility",
+            "Clouds"
+        ]],
+
+        use_container_width=True,
+        hide_index=True
+    )
